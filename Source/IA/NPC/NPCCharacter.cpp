@@ -74,6 +74,12 @@ void ANPCCharacter::SetMoveSpeed(float Speed)
 	GetCharacterMovement()->MaxWalkSpeed = Speed;
 }
 
+void ANPCCharacter::SetFaceFocusMode(bool bEnable)
+{
+	GetCharacterMovement()->bOrientRotationToMovement = !bEnable;
+	GetCharacterMovement()->bUseControllerDesiredRotation = bEnable;
+}
+
 void ANPCCharacter::ShowStateText(const FString& Text, const FColor& Color, float Duration) const
 {
 	DrawDebugString(GetWorld(), FVector(0.0f, 0.0f, 120.0f), Text, const_cast<ANPCCharacter*>(this), Color, Duration, true, 1.5f);

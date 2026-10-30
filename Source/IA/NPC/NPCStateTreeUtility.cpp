@@ -7,6 +7,9 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
+#include "EnvironmentQuery/EnvQuery.h"
+#include "EnvironmentQuery/EnvQueryManager.h"
+#include "DrawDebugHelpers.h"
 
 namespace NPCStateTree
 {
@@ -261,5 +264,196 @@ EStateTreeRunStatus FNPCGreetPlayerTask::Tick(FStateTreeExecutionContext& Contex
 FText FNPCGreetPlayerTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
 {
 	return FText::FromString(TEXT("<b>Greet</b> the player"));
+}
+#endif
+
+////////////////////////////////////////////////////////////////////
+// NPC: Find Vantage Point (EQS)
+
+void FNPCFindVantagePointTask::RunQuery(FInstanceDataType& InstanceData) const
+{
+	FEnvQueryRequest QueryRequest(InstanceData.Query, InstanceData.Actor);
+
+	// el callback sólo captura el resultado compartido, así es seguro aunque el estado ya haya terminado
+	TSharedPtr<FNPCVantageQueryResult> SharedResult = InstanceData.Result;
+
+	InstanceData.QueryRequestId = QueryRequest.Execute(InstanceData.RunMode,
+		FQueryFinishedSignature::CreateLambda([SharedResult](TSharedPtr<FEnvQueryResult> QueryResult)
+		{
+			if (QueryResult.IsValid() && QueryResult->IsSuccessful() && QueryResult->Items.Num() > 0)
+			{
+				SharedResult->Location = QueryResult->GetItemAsLocation(0);
+				SharedResult->Version++;
+			}
+		}));
+}
+
+EStateTreeRunStatus FNPCFindVantagePointTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
+
+	if (!InstanceData.Actor || !InstanceData.Query)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	InstanceData.Result = MakeShared<FNPCVantageQueryResult>();
+	InstanceData.LastVersion = 0;
+	InstanceData.bHasResult = false;
+	InstanceData.RequeryRemaining = InstanceData.RequeryInterval;
+
+	RunQuery(InstanceData);
+
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FNPCFindVantagePointTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
+
+	// ¿llegó un resultado nuevo? -> publicarlo en la salida (la leen las tareas enlazadas)
+	if (InstanceData.Result.IsValid() && InstanceData.Result->Version != InstanceData.LastVersion)
+	{
+		InstanceData.LastVersion = InstanceData.Result->Version;
+		InstanceData.VantagePoint = InstanceData.Result->Location;
+		InstanceData.bHasResult = true;
+	}
+
+	// re-evaluar periódicamente porque el jugador se mueve
+	InstanceData.RequeryRemaining -= DeltaTime;
+	if (InstanceData.RequeryRemaining <= 0.0f)
+	{
+		InstanceData.RequeryRemaining = InstanceData.RequeryInterval;
+		RunQuery(InstanceData);
+	}
+
+	if (InstanceData.bHasResult)
+	{
+		DrawDebugSphere(InstanceData.Actor->GetWorld(), InstanceData.VantagePoint, 30.0f, 12, FColor::Yellow);
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+void FNPCFindVantagePointTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
+
+	if (InstanceData.QueryRequestId != INDEX_NONE && InstanceData.Actor)
+	{
+		if (UEnvQueryManager* QueryManager = UEnvQueryManager::GetCurrent(InstanceData.Actor))
+		{
+			QueryManager->AbortQuery(InstanceData.QueryRequestId);
+		}
+	}
+
+	InstanceData.QueryRequestId = INDEX_NONE;
+	InstanceData.Result.Reset();
+}
+
+#if WITH_EDITOR
+FText FNPCFindVantagePointTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	const FInstanceDataType* InstanceData = InstanceDataView.GetPtr<FInstanceDataType>();
+	return FText::FromString(FString::Printf(TEXT("<b>Find Vantage Point</b> %s"), *GetNameSafe(InstanceData ? InstanceData->Query.Get() : nullptr)));
+}
+#endif
+
+////////////////////////////////////////////////////////////////////
+// NPC: Move To Point
+
+EStateTreeRunStatus FNPCMoveToPointTask::EnterState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
+
+	if (!InstanceData.Actor || !InstanceData.AIController)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	ANPCCharacter* NPC = Cast<ANPCCharacter>(InstanceData.Actor);
+	if (NPC)
+	{
+		NPC->SetMoveSpeed(NPC->ChaseSpeed);
+	}
+
+	// mirar al jugador: la vista de la percepción sigue la rotación de control, así no lo pierde al reposicionarse
+	if (InstanceData.bFacePlayer)
+	{
+		InstanceData.AIController->SetFocus(NPCStateTree::GetPlayerPawn(InstanceData.Actor), EAIFocusPriority::Gameplay);
+		if (NPC)
+		{
+			NPC->SetFaceFocusMode(true);
+		}
+	}
+
+	InstanceData.bHasRequested = false;
+
+	return EStateTreeRunStatus::Running;
+}
+
+EStateTreeRunStatus FNPCMoveToPointTask::Tick(FStateTreeExecutionContext& Context, const float DeltaTime) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
+
+	ANPCCharacter* NPC = Cast<ANPCCharacter>(InstanceData.Actor);
+	AAIController* Controller = InstanceData.AIController;
+	if (!NPC || !Controller)
+	{
+		return EStateTreeRunStatus::Failed;
+	}
+
+	// Destination llega por Property Binding desde la tarea EQS; ZeroVector = todavía sin resultado
+	const bool bValid = InstanceData.bDestinationValid && !InstanceData.Destination.IsNearlyZero();
+
+	if (!bValid)
+	{
+		NPC->ShowStateText(TEXT("TACTICO: buscando punto (EQS)..."), FColor::Yellow);
+		return EStateTreeRunStatus::Running;
+	}
+
+	const bool bDestinationChanged = !InstanceData.bHasRequested
+		|| FVector::Dist(InstanceData.Destination, InstanceData.LastRequestedDestination) > InstanceData.RepathDistance;
+
+	if (bDestinationChanged)
+	{
+		const EPathFollowingRequestResult::Type Result = Controller->MoveToLocation(InstanceData.Destination, InstanceData.AcceptanceRadius);
+		InstanceData.bHasRequested = Result != EPathFollowingRequestResult::Failed;
+		InstanceData.LastRequestedDestination = InstanceData.Destination;
+	}
+
+	if (Controller->GetMoveStatus() == EPathFollowingStatus::Moving)
+	{
+		NPC->ShowStateText(TEXT("TACTICO: moviendo a punto de ventaja"), FColor::Yellow);
+	}
+	else
+	{
+		NPC->ShowStateText(TEXT("TACTICO: en posicion"), FColor::Yellow);
+	}
+
+	return EStateTreeRunStatus::Running;
+}
+
+void FNPCMoveToPointTask::ExitState(FStateTreeExecutionContext& Context, const FStateTreeTransitionResult& Transition) const
+{
+	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
+
+	if (InstanceData.AIController)
+	{
+		InstanceData.AIController->StopMovement();
+		InstanceData.AIController->ClearFocus(EAIFocusPriority::Gameplay);
+	}
+
+	if (ANPCCharacter* NPC = Cast<ANPCCharacter>(InstanceData.Actor))
+	{
+		NPC->SetMoveSpeed(NPC->PatrolSpeed);
+		NPC->SetFaceFocusMode(false);
+	}
+}
+
+#if WITH_EDITOR
+FText FNPCMoveToPointTask::GetDescription(const FGuid& ID, FStateTreeDataView InstanceDataView, const IStateTreeBindingLookup& BindingLookup, EStateTreeNodeFormatting Formatting) const
+{
+	return FText::FromString(TEXT("<b>Move To</b> bound point"));
 }
 #endif

@@ -48,6 +48,9 @@ public:
 	/** Cambia la velocidad de movimiento */
 	void SetMoveSpeed(float Speed);
 
+	/** true: el cuerpo gira hacia el foco del controlador (ej. el jugador) en vez de hacia donde camina */
+	void SetFaceFocusMode(bool bEnable);
+
 	/** Muestra un texto de debug sobre la cabeza del NPC (visible en el juego) */
 	void ShowStateText(const FString& Text, const FColor& Color, float Duration = 0.0f) const;
 
