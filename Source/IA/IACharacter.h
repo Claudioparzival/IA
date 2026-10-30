@@ -1,15 +1,17 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
 #include "Logging/LogMacros.h"
+#include "GameplayTagContainer.h"
 #include "IACharacter.generated.h"
 
 class USpringArmComponent;
 class UCameraComponent;
 class UInputAction;
+class UAIPerceptionStimuliSourceComponent;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -30,6 +32,10 @@ class AIACharacter : public ACharacter
 	/** Follow camera */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
 	UCameraComponent* FollowCamera;
+
+	/** Makes the player perceivable by the NPC sight sense */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
+	UAIPerceptionStimuliSourceComponent* StimuliSource;
 	
 protected:
 
@@ -49,12 +55,19 @@ protected:
 	UPROPERTY(EditAnywhere, Category="Input")
 	UInputAction* MouseLookAction;
 
+	/** Sprint Input Action */
+	UPROPERTY(EditAnywhere, Category="Input")
+	UInputAction* SprintAction;
+
 public:
 
 	/** Constructor */
 	AIACharacter();	
 
 protected:
+
+	/** Registers the stimuli source for AI perception */
+	virtual void BeginPlay() override;
 
 	/** Initialize input action bindings */
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
@@ -84,6 +97,40 @@ public:
 	/** Handles jump pressed inputs from either controls or UI interfaces */
 	UFUNCTION(BlueprintCallable, Category="Input")
 	virtual void DoJumpEnd();
+
+	/** Adds the sprinting tag to the ASC, unless the character is stunned */
+	UFUNCTION(BlueprintCallable, Category="Input")
+	void StartSprinting();
+
+	/** Removes the sprinting tag from the ASC */
+	UFUNCTION(BlueprintCallable, Category="Input")
+	void StopSprinting();
+
+	/** Returns true if the ASC owns the given tag */
+	UFUNCTION(BlueprintCallable, Category="Input")
+	bool HasStateTag(FGameplayTag TagToCheck) const;
+
+	/** Adds the State.Debuff.Stunned tag if bIsStunned is true, removes it otherwise */
+	UFUNCTION(BlueprintCallable, Category="State")
+	void ToggleStun(bool bIsStunned);
+
+protected:
+
+	/** Server: initializes the ASC actor info */
+	virtual void PossessedBy(AController* NewController) override;
+
+	/** Client: initializes the ASC actor info */
+	virtual void OnRep_PlayerState() override;
+
+	/** Sets the PlayerState as owner and this character as avatar of the ASC */
+	void InitAbilityActorInfo();
+
+private:
+
+	//Tag Cache
+	FGameplayTag SprintingTag;
+
+	FGameplayTag StunnedTag; //new tag for the stunned debuff.
 
 public:
 

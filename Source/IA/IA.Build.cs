@@ -17,6 +17,9 @@ public class IA : ModuleRules
 			"AIModule",
 			"StateTreeModule",
 			"GameplayStateTreeModule",
+			"GameplayTags",
+			"GameplayAbilities",
+			"GameplayTasks",
 			"UMG",
 			"Slate"
 		});

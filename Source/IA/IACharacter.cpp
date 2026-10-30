@@ -10,6 +10,11 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
+#include "Perception/AIPerceptionStimuliSourceComponent.h"
+#include "Perception/AISense_Sight.h"
+#include "AbilitySystemComponent.h"
+#include "GameplayTagsManager.h"
+#include "IAPlayerState.h"
 #include "IA.h"
 
 AIACharacter::AIACharacter()
@@ -46,8 +51,23 @@ AIACharacter::AIACharacter()
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FollowCamera->bUsePawnControlRotation = false;
 
+	// Make the player visible to the NPC sight sense
+	StimuliSource = CreateDefaultSubobject<UAIPerceptionStimuliSourceComponent>(TEXT("StimuliSource"));
+
+	// Get the saved tag in DefaultGameplayTags.ini
+	SprintingTag = UGameplayTagsManager::Get().RequestGameplayTag(FName("State.Movement.Sprinting"));
+	StunnedTag = UGameplayTagsManager::Get().RequestGameplayTag(FName("State.Debuff.Stunned")); // the new tag to save from DefaultGameplayTags.ini
+
 	// Note: The skeletal mesh and anim blueprint references on the Mesh component (inherited from Character) 
 	// are set in the derived blueprint asset named ThirdPersonCharacter (to avoid direct content references in C++)
+}
+
+void AIACharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	StimuliSource->RegisterForSense(UAISense_Sight::StaticClass());
+	StimuliSource->RegisterWithPerceptionSystem();
 }
 
 void AIACharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -65,6 +85,10 @@ void AIACharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 
 		// Looking
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &AIACharacter::Look);
+
+		// Sprinting
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &AIACharacter::StartSprinting);
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Completed, this, &AIACharacter::StopSprinting);
 	}
 	else
 	{
@@ -130,4 +154,100 @@ void AIACharacter::DoJumpEnd()
 {
 	// signal the character to stop jumping
 	StopJumping();
+}
+
+void AIACharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+
+	InitAbilityActorInfo();
+}
+
+void AIACharacter::OnRep_PlayerState()
+{
+	Super::OnRep_PlayerState();
+
+	InitAbilityActorInfo();
+}
+
+void AIACharacter::InitAbilityActorInfo()
+{
+	if (AIAPlayerState* IAPS = GetPlayerState<AIAPlayerState>())
+	{
+		if (UAbilitySystemComponent* ASC = IAPS->GetAbilitySystemComponent())
+		{
+			// The PlayerState owns the ASC, this character is its avatar
+			ASC->InitAbilityActorInfo(IAPS, this);
+		}
+	}
+}
+
+void AIACharacter::ToggleStun(bool bIsStunned)
+{
+	if (AIAPlayerState* IAPS = GetPlayerState<AIAPlayerState>())
+	{
+		if (UAbilitySystemComponent* ASC = IAPS->GetAbilitySystemComponent())
+		{
+			if (bIsStunned)
+			{
+				//Ask if the tag was already added
+				if (!ASC->HasMatchingGameplayTag(StunnedTag))
+				{
+					//If the tag wasn't added then add it
+					ASC->AddLooseGameplayTag(StunnedTag);
+				}
+			}
+			else
+			{
+				//If the tag was added then remove it
+				ASC->RemoveLooseGameplayTag(StunnedTag);
+			}
+		}
+	}
+}
+
+void AIACharacter::StartSprinting()
+{
+	if (AIAPlayerState* IAPS = GetPlayerState<AIAPlayerState>())
+	{
+		if (UAbilitySystemComponent* ASC = IAPS->GetAbilitySystemComponent())
+		{
+			//Ask if the player is stunned.
+			if (ASC->HasMatchingGameplayTag(StunnedTag))
+			{
+				return;
+			}
+			// Ask if the tag was already added.
+			if (!HasStateTag(SprintingTag))
+			{
+				//If the tag wasn't added then add it.
+				ASC->AddLooseGameplayTag(SprintingTag);
+			}
+		}
+	}
+}
+
+void AIACharacter::StopSprinting()
+{
+	if (AIAPlayerState* IAPS = GetPlayerState<AIAPlayerState>())
+	{
+		UAbilitySystemComponent* ASC = IAPS->GetAbilitySystemComponent();
+		if (ASC)
+		{
+			ASC->RemoveLooseGameplayTag(SprintingTag);
+		}
+	}
+}
+
+bool AIACharacter::HasStateTag(FGameplayTag TagToCheck) const
+{
+	if (AIAPlayerState* IAPS = GetPlayerState<AIAPlayerState>())
+	{
+		if (UAbilitySystemComponent* ASC = IAPS->GetAbilitySystemComponent())
+		{
+			return ASC->HasMatchingGameplayTag(TagToCheck);
+		}
+		return false;
+	}
+	return false;
 }
